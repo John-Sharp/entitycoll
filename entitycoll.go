@@ -1,18 +1,17 @@
 package entitycoll
 
 import (
-    "context"
-	"strconv"
+	"context"
+	"encoding/json"
+	"fmt"
+	"github.com/satori/go.uuid"
+	"io/ioutil"
+	"log"
 	"net/http"
 	"net/url"
-    "log"
+	"strconv"
 	"strings"
-	"github.com/satori/go.uuid"
-    "io/ioutil"
-	"encoding/json"
-    "fmt"
 )
-
 
 // takes a route to an entity collection and an entity collection
 // and sets up handlers with defaultMux in net/http for entities of
@@ -33,17 +32,14 @@ func CreateApiObject(ec EntityCollection) {
 	entityServeMux.Handle(sPath, sHandler)
 }
 
-
-
-
 // import ("fmt")
 
 // function variable containing function that will take username
-// and password from a request's Basic Authentication headers 
+// and password from a request's Basic Authentication headers
 // and return the Entity that has that is authenticated by
 // that username and password. In case no entity is found,
 // nil is returned and error set
-var getRequestor func (uname, pwd string) (Entity, error)
+var getRequestor func(uname, pwd string) (Entity, error)
 
 // type definition of a generic api entity
 type Entity interface{}
@@ -81,10 +77,9 @@ type EntityCollection interface {
 	DelEntity(targetUuid uuid.UUID) error
 }
 
-func SetRequestorAuthFn (raf func(uname, pwd string)(Entity, error)) {
-    getRequestor = raf
+func SetRequestorAuthFn(raf func(uname, pwd string) (Entity, error)) {
+	getRequestor = raf
 }
-
 
 type CollFilter struct {
 	Page        *int64
@@ -123,7 +118,7 @@ type PropFilterObj struct {
 
 type Collection struct {
 	TotalEntities uint
-	Entities      interface{}
+	Entities      []Entity
 }
 
 func (cf *CollFilter) popSort(sortString string) {
@@ -276,6 +271,7 @@ func entityApiHandlerFactory(ec EntityCollection) (http.Handler, http.Handler) {
 			err = cf.pop(r)
 			c, err := ec.GetCollection(parentEntityUuids, cf)
 			if err != nil {
+				log.Println(err)
 				http.Error(w, "error retrieving collection", http.StatusInternalServerError)
 				return
 			}
@@ -374,7 +370,7 @@ func getRequestorFromRequest(r *http.Request) Entity {
 	return r.Context().Value(requestorKey)
 }
 
-// TODO don't expose this, rather get the api root and 
+// TODO don't expose this, rather get the api root and
 // set this up internally
 // handles all requests to the api root, processes the requested URL
 // to see what entity the request deals with and gets that handler to
