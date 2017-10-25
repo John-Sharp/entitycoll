@@ -4,13 +4,14 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"github.com/satori/go.uuid"
 	"io/ioutil"
 	"log"
 	"net/http"
 	"net/url"
 	"strconv"
 	"strings"
+
+	"github.com/satori/go.uuid"
 )
 
 // takes a route to an entity collection and an entity collection
@@ -205,7 +206,7 @@ func entityApiHandlerFactory(ec EntityCollection) (http.Handler, http.Handler) {
 		}
 
 		switch r.Method {
-		case "PUT":
+		case http.MethodPut:
 			b, err := ioutil.ReadAll(r.Body)
 			if err != nil {
 				http.Error(w, "error parsing request body: "+err.Error(), http.StatusInternalServerError)
@@ -218,13 +219,13 @@ func entityApiHandlerFactory(ec EntityCollection) (http.Handler, http.Handler) {
 			}
 
 			return
-		case "DELETE":
+		case http.MethodDelete:
 			err = ec.DelEntity(entityUuid)
 			if err != nil {
 				http.Error(w, "error deleting entity: "+err.Error(), http.StatusInternalServerError)
 				return
 			}
-		case "GET":
+		case http.MethodGet:
 			var ej []byte
 			u, err := ec.GetEntity(entityUuid)
 			if err != nil {
@@ -265,7 +266,7 @@ func entityApiHandlerFactory(ec EntityCollection) (http.Handler, http.Handler) {
 		}
 
 		switch r.Method {
-		case "GET":
+		case http.MethodGet:
 			var ej []byte
 			var cf CollFilter
 			err = cf.pop(r)
@@ -285,7 +286,7 @@ func entityApiHandlerFactory(ec EntityCollection) (http.Handler, http.Handler) {
 			fmt.Fprint(w, string(ej))
 			return
 
-		case "POST":
+		case http.MethodPost:
 			b, err := ioutil.ReadAll(r.Body)
 			if err != nil {
 				http.Error(w, "error parsing request body: "+err.Error(), http.StatusInternalServerError)
@@ -310,7 +311,7 @@ func entityApiHandlerFactory(ec EntityCollection) (http.Handler, http.Handler) {
 // be specified in main
 func applySecurity(handler http.Handler) http.Handler {
 	securityHandler := func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == "OPTIONS" {
+		if r.Method == http.MethodOptions {
 			handler.ServeHTTP(w, r)
 			return
 		}
@@ -338,13 +339,13 @@ func applySecurity(handler http.Handler) http.Handler {
 func applyCorsHeaders(handler http.Handler) http.Handler {
 	corsHandler := func(w http.ResponseWriter, r *http.Request) {
 
-		if r.Method == "OPTIONS" {
+		if r.Method == http.MethodOptions {
 			w.Header().Add("Access-Control-Allow-Origin", "http://localhost:8090")
 			w.Header().Add("Access-Control-Allow-Headers", "Authorization")
 			// TODO allow specification of the allowed methods
 			w.Header().Add("Access-Control-Allow-Methods", "GET, PUT, POST, DELETE")
 			return
-		} else if r.Method == "GET" || r.Method == "PUT" || r.Method == "POST" || r.Method == "DELETE" {
+		} else if r.Method == http.MethodGet || r.Method == http.MethodPut || r.Method == http.MethodPost || r.Method == http.MethodDelete {
 			w.Header().Add("Access-Control-Allow-Origin", "http://localhost:8090")
 			w.Header().Add("Access-Control-Expose-Headers", "Location")
 			handler.ServeHTTP(w, r)
