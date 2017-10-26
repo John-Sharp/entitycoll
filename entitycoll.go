@@ -187,21 +187,19 @@ func (cf *CollFilter) pop(r *http.Request) error {
 	return nil
 }
 
-// returns two http.Handlers for dealing with REST API requests
-// manipulating entities in entity collection 'ec'
-// first return value is for dealing with requests ending in /<uuid> and
-// handles api retrieval, edit, and deletion of single entity
-// second return value is for dealing with requests dealing with whole collection,
-// and handles creation of an entity in the collection, and retrieval
-// of whole collection
-func entityApiHandlerFactory(ec EntityCollection) (http.Handler, http.Handler) {
-	singularHandler := func(w http.ResponseWriter, r *http.Request) {
+// getSingularHandler(ec EntityCollection) returns a http.Handler for
+// dealing with requests involving a single entity in the EntityCollection 'ec',
+// such requests have a URL path '/<collection-name>/<uuid>'
+// Operations include retrieval of an entity in collection, edit of entity,
+// and deletion of an entity
+func getSingularHandler(ec EntityCollection) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		pathComponents := strings.Split(r.URL.Path, "/")[1:]
 		entityUuid, err := uuid.FromString(pathComponents[len(pathComponents)-1])
 
 		if err != nil {
-			log.Println(err.Error())
-			http.Error(w, "error decoding UUID", http.StatusInternalServerError)
+			log.Printf("error parsing UUID (%s): %v", pathComponents[len(pathComponents)-1], err)
+			http.Error(w, "error parsing  UUID", http.StatusBadRequest)
 			return
 		}
 
@@ -209,12 +207,14 @@ func entityApiHandlerFactory(ec EntityCollection) (http.Handler, http.Handler) {
 		case http.MethodPut:
 			b, err := ioutil.ReadAll(r.Body)
 			if err != nil {
-				http.Error(w, "error parsing request body: "+err.Error(), http.StatusInternalServerError)
+				log.Printf("error parsing request body: %v", err)
+				http.Error(w, "error parsing request body", http.StatusInternalServerError)
 				return
 			}
 			err = ec.EditEntity(entityUuid, b)
 			if err != nil {
-				http.Error(w, "error editing entity: "+err.Error(), http.StatusInternalServerError)
+				log.Printf("error editing entity: %v", err)
+				http.Error(w, "error editing entity", http.StatusInternalServerError)
 				return
 			}
 
@@ -222,79 +222,131 @@ func entityApiHandlerFactory(ec EntityCollection) (http.Handler, http.Handler) {
 		case http.MethodDelete:
 			err = ec.DelEntity(entityUuid)
 			if err != nil {
-				http.Error(w, "error deleting entity: "+err.Error(), http.StatusInternalServerError)
+				log.Printf("error deleting entity: %v", err)
+				http.Error(w, "error deleting entity", http.StatusInternalServerError)
 				return
 			}
 		case http.MethodGet:
-			var ej []byte
-			u, err := ec.GetEntity(entityUuid)
+			var entityJson []byte
+			entity, err := ec.GetEntity(entityUuid)
 			if err != nil {
-				http.Error(w, "could not find entity", http.StatusInternalServerError)
+				log.Printf("error getting entity: %v", err)
+				http.Error(w, "could not find entity to GET", http.StatusBadRequest)
 				return
 			}
-			ej, err = json.Marshal(u)
+			entityJson, err = json.Marshal(entity)
 			if err != nil {
+				log.Printf("error encoding JSON entity (%+v): %v", entity, err)
 				http.Error(w, "error encoding JSON", http.StatusInternalServerError)
 				return
 			}
 
-			fmt.Fprint(w, string(ej))
+			fmt.Fprint(w, string(entityJson))
 		default:
 		}
 
+	})
+}
+
+type pathComponentError string
+
+func (p pathComponentError) Error() string {
+	return fmt.Sprintf("collection entity URL (%s) should have an even number of components (entity name and UUID for each parent entity and name for entity)", string(p))
+}
+
+type parseUUIDError struct {
+	pathComponent string
+	parseError    error
+}
+
+func (p parseUUIDError) Error() string {
+	return fmt.Sprintf("error decoding UUID of path component (%s) : %s", p.pathComponent, p.parseError)
+}
+
+// getPathComponentUuids(path string) takes a path that should be composed
+// of one or more repeats of '/<component-name>/<uuid>'
+// and then a final '/<component-name>'. Function processes
+// this into a map mapping from '<component-name>'s to UUIDs which is returned.
+// Can return an empty map and 'pathComponentError' if path is not of right
+// form, or an empty map and 'parseUUIDError' if any one of the '<uuid>'s is not
+// in a form suitable for parsing into a UUID
+func getPathComponentUuids(path string) (map[string]uuid.UUID, error) {
+	pathComponents := strings.Split(path, "/")[1:]
+
+	if len(pathComponents)%2 != 1 {
+		return map[string]uuid.UUID{}, pathComponentError(path)
 	}
 
-	pluralHandler := func(w http.ResponseWriter, r *http.Request) {
-		pathComponents := strings.Split(r.URL.Path, "/")[1:]
+	var err error
+	parentEntityUuids := make(map[string]uuid.UUID)
+	for i := 0; i < len(pathComponents)-1; i += 2 {
+		parentEntityUuids[pathComponents[i]], err = uuid.FromString(pathComponents[i+1])
 
-		if len(pathComponents)%2 != 1 {
-			log.Println("collection entity URL should have an even number of components (entity name and UUID for each parent entity and name for entity)")
-			http.Error(w, "error parsing URL", http.StatusInternalServerError)
-			return
+		if err != nil {
+			return map[string]uuid.UUID{}, parseUUIDError{pathComponent: pathComponents[i], parseError: err}
 		}
+	}
+	return parentEntityUuids, nil
+}
 
-		var err error
-		parentEntityUuids := make(map[string]uuid.UUID)
-		for i := 0; i < len(pathComponents)-1; i += 2 {
-			parentEntityUuids[pathComponents[i]], err = uuid.FromString(pathComponents[i+1])
-
-			if err != nil {
-				log.Println("error decoding UUID of path component: ", pathComponents[i], ": ", err.Error())
-				http.Error(w, "error parsing URL", http.StatusInternalServerError)
-				return
+// getPluralHandler(ec EntityCollection) returns a http.Handler for
+// dealing with requests involving the whole EntityCollection 'ec'.
+// This includes creation of entity in collection, and retrieval of
+// whole collection
+func getPluralHandler(ec EntityCollection) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		parentEntityUuids, err := getPathComponentUuids(r.URL.Path)
+		if err != nil {
+			log.Println(err)
+			switch err := err.(type) {
+			default:
+				http.Error(w, "unexpected error", http.StatusInternalServerError)
+			case pathComponentError:
+				http.Error(w, "invalid collection path", http.StatusNotFound)
+			case parseUUIDError:
+				http.Error(w, fmt.Sprintf("invalid UUID for component: %s", err.pathComponent), http.StatusNotFound)
 			}
+			return
 		}
 
 		switch r.Method {
 		case http.MethodGet:
-			var ej []byte
+			var entityJson []byte
 			var cf CollFilter
 			err = cf.pop(r)
+			if err != nil {
+				log.Printf("error retrieving collection, parsing collection filters: %v", err)
+				http.Error(w, "error parsing collection filters", http.StatusBadRequest)
+			}
+
 			c, err := ec.GetCollection(parentEntityUuids, cf)
 			if err != nil {
-				log.Println(err)
-				http.Error(w, "error retrieving collection", http.StatusInternalServerError)
+				log.Printf("error retrieving collection, getting collection: %v", err)
+				http.Error(w, "error retrieving collection", http.StatusNotFound)
 				return
 			}
 
-			ej, err = json.Marshal(c)
+			entityJson, err = json.Marshal(c)
 			if err != nil {
-				http.Error(w, "error decoding JSON", http.StatusInternalServerError)
+				log.Printf("error retrieving collection (%+v): %v", c, err)
+				http.Error(w, "error encoding JSON", http.StatusInternalServerError)
 				return
 			}
 
-			fmt.Fprint(w, string(ej))
+			fmt.Fprint(w, string(entityJson))
 			return
 
 		case http.MethodPost:
 			b, err := ioutil.ReadAll(r.Body)
 			if err != nil {
-				http.Error(w, "error parsing request body: "+err.Error(), http.StatusInternalServerError)
+				log.Printf("error reading request body: %v", err)
+				http.Error(w, "error reading request body", http.StatusInternalServerError)
 				return
 			}
 			entityPath, err := ec.CreateEntity(getRequestorFromRequest(r), parentEntityUuids, b)
 			if err != nil {
-				http.Error(w, "error creating entity: "+err.Error(), http.StatusInternalServerError)
+				log.Println("error creating entity: %v", err)
+				http.Error(w, "error creating entity", http.StatusBadRequest)
 				return
 			}
 
@@ -302,9 +354,23 @@ func entityApiHandlerFactory(ec EntityCollection) (http.Handler, http.Handler) {
 			w.WriteHeader(http.StatusCreated)
 		default:
 		}
-	}
+	})
+}
 
-	return http.HandlerFunc(singularHandler), http.HandlerFunc(pluralHandler)
+// entityApiHandlerFactory(ec EntityCollection) returns two http.Handlers
+// for dealing with REST API requests
+// manipulating entities in entity collection 'ec'.
+// First return value is for dealing with requests ending in /<uuid> and
+// handles api retrieval, edit, and deletion of a single entity.
+// Second return value is for dealing with requests dealing with whole collection,
+// and handles creation of an entity in the collection, and retrieval
+// of whole collection
+func entityApiHandlerFactory(ec EntityCollection) (http.Handler, http.Handler) {
+	singularHandler := getSingularHandler(ec)
+
+	pluralHandler := getPluralHandler(ec)
+
+	return singularHandler, pluralHandler
 }
 
 // TODO set the Access-Control-Allow-Origin header to a value that can
